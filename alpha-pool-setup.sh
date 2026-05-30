@@ -12,6 +12,7 @@ SUPERVISOR="$INSTALL_DIR/alpha-pool-supervisor.sh"
 STATUS_BIN="$INSTALL_DIR/status.sh"
 UPDATE_BIN="$INSTALL_DIR/update.sh"
 RESTART_BIN="$INSTALL_DIR/restart.sh"
+SET_ADDRESS_BIN="$INSTALL_DIR/set-address.sh"
 CONFIG_FILE="$INSTALL_DIR/alpha-pool.env"
 MINER_LOG="$INSTALL_DIR/alpha-miner.log"
 SUPERVISOR_LOG="$INSTALL_DIR/supervisor.log"
@@ -324,6 +325,46 @@ pm2 restart alpha-pool
 pm2 logs alpha-pool --lines 80
 EOF
   chmod +x "$RESTART_BIN"
+
+  cat >"$SET_ADDRESS_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="$HOME/alpha-pool/alpha-pool.env"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "missing config: $CONFIG" >&2
+  exit 1
+fi
+
+read -r -p "New PRL address (prl1p...): " address </dev/tty
+if [[ ! "$address" =~ ^prl1p[a-z0-9]+$ ]]; then
+  echo "invalid PRL address: must start with prl1p" >&2
+  exit 1
+fi
+
+read -r -p "Worker name (blank = keep current): " worker </dev/tty
+
+tmp="$(mktemp)"
+while IFS= read -r line; do
+  case "$line" in
+    ADDRESS=*) printf 'ADDRESS=%q\n' "$address" ;;
+    WORKER=*)
+      if [[ -n "$worker" ]]; then
+        printf 'WORKER=%q\n' "$worker"
+      else
+        printf '%s\n' "$line"
+      fi
+      ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done <"$CONFIG" >"$tmp"
+mv "$tmp" "$CONFIG"
+
+pkill -x alpha-miner >/dev/null 2>&1 || true
+pm2 restart alpha-pool
+pm2 logs alpha-pool --lines 80
+EOF
+  chmod +x "$SET_ADDRESS_BIN"
 }
 
 download_miner() {
@@ -372,6 +413,7 @@ main() {
   echo "  $STATUS_BIN"
   echo "  $UPDATE_BIN"
   echo "  $RESTART_BIN"
+  echo "  $SET_ADDRESS_BIN"
 }
 
 main "$@"
