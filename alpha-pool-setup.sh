@@ -18,9 +18,13 @@ MINER_LOG="$INSTALL_DIR/alpha-miner.log"
 SUPERVISOR_LOG="$INSTALL_DIR/supervisor.log"
 MINER_PID="$INSTALL_DIR/alpha-miner.pid"
 CURRENT_POOL="$INSTALL_DIR/current-pool"
+POOL_STATE="$INSTALL_DIR/pool-state"
+MINER_STARTED_AT="$INSTALL_DIR/miner-started-at"
 PM2_APP="alpha-pool"
 PORT="5566"
 CHECK_INTERVAL="30"
+POOL_COOLDOWN="300"
+STARTUP_GRACE="90"
 
 ENDPOINTS=(
   "us1.alphapool.tech:North America East"
@@ -107,8 +111,12 @@ write_config() {
     printf 'SUPERVISOR_LOG=%s\n' "$(shell_quote "$SUPERVISOR_LOG")"
     printf 'MINER_PID=%s\n' "$(shell_quote "$MINER_PID")"
     printf 'CURRENT_POOL=%s\n' "$(shell_quote "$CURRENT_POOL")"
+    printf 'POOL_STATE=%s\n' "$(shell_quote "$POOL_STATE")"
+    printf 'MINER_STARTED_AT=%s\n' "$(shell_quote "$MINER_STARTED_AT")"
     printf 'PORT=%s\n' "$(shell_quote "$PORT")"
     printf 'CHECK_INTERVAL=%s\n' "$(shell_quote "$CHECK_INTERVAL")"
+    printf 'POOL_COOLDOWN=%s\n' "$(shell_quote "$POOL_COOLDOWN")"
+    printf 'STARTUP_GRACE=%s\n' "$(shell_quote "$STARTUP_GRACE")"
     printf 'ADDRESS=%s\n' "$(shell_quote "$address")"
     printf 'WORKER=%s\n' "$(shell_quote "$worker")"
     printf 'ENDPOINTS=(\n'
@@ -210,7 +218,64 @@ tcp_latency_ms() {
   fi
 }
 
-best_pool() {
+state_until() {
+  local host="$1"
+  [[ -f "$POOL_STATE" ]] || { echo 0; return; }
+  awk -v host="$host" '$1 == host { print $2 }' "$POOL_STATE" | tail -n 1
+}
+
+mark_bad_pool() {
+  local host="$1"
+  local until
+  until=$(( $(date +%s) + POOL_COOLDOWN ))
+  mkdir -p "$(dirname "$POOL_STATE")"
+  grep -v "^${host} " "$POOL_STATE" 2>/dev/null >"${POOL_STATE}.tmp" || true
+  printf '%s %s\n' "$host" "$until" >>"${POOL_STATE}.tmp"
+  mv "${POOL_STATE}.tmp" "$POOL_STATE"
+  log "cooldown ${host}:${PORT} until=${until}"
+}
+
+pool_available() {
+  local host="$1"
+  local now until ms
+  now="$(date +%s)"
+  until="$(state_until "$host")"
+  until="${until:-0}"
+  if [[ "$until" -gt "$now" ]]; then
+    log "skip ${host}:${PORT} cooldown_remaining=$((until - now))s"
+    return 1
+  fi
+  ms="$(tcp_latency_ms "$host")"
+  if [[ "$ms" -ge 999999 ]]; then
+    log "skip ${host}:${PORT} tcp_failed"
+    return 1
+  fi
+  log "candidate ${host}:${PORT} ${ms}ms"
+  return 0
+}
+
+next_pool() {
+  local current="$1"
+  local seen_current=0 item host first_available=""
+  for item in "${ENDPOINTS[@]}"; do
+    host="${item%%:*}"
+    if pool_available "$host"; then
+      [[ -z "$first_available" ]] && first_available="$host"
+      if [[ "$seen_current" -eq 1 || -z "$current" ]]; then
+        printf '%s' "$host"
+        return
+      fi
+    fi
+    [[ "$host" == "$current" ]] && seen_current=1
+  done
+  if [[ -n "$first_available" ]]; then
+    printf '%s' "$first_available"
+  else
+    printf 'us2.alphapool.tech'
+  fi
+}
+
+best_initial_pool() {
   local best_host="" best_ms=999999 item host label ms
   for item in "${ENDPOINTS[@]}"; do
     host="${item%%:*}"
@@ -218,12 +283,12 @@ best_pool() {
     ms="$(tcp_latency_ms "$host")"
     if [[ "$ms" -lt 999999 ]]; then
       log "latency ${host}:${PORT} ${ms}ms ${label}"
+      if [[ "$ms" -lt "$best_ms" ]]; then
+        best_ms="$ms"
+        best_host="$host"
+      fi
     else
       log "latency ${host}:${PORT} failed ${label}"
-    fi
-    if [[ "$ms" -lt "$best_ms" ]]; then
-      best_ms="$ms"
-      best_host="$host"
     fi
   done
   if [[ -z "$best_host" || "$best_ms" -ge 999999 ]]; then
@@ -234,6 +299,14 @@ best_pool() {
 
 miner_running() {
   [[ -s "$MINER_PID" ]] && kill -0 "$(cat "$MINER_PID")" >/dev/null 2>&1
+}
+
+in_startup_grace() {
+  local started now
+  [[ -s "$MINER_STARTED_AT" ]] || return 1
+  started="$(cat "$MINER_STARTED_AT")"
+  now="$(date +%s)"
+  [[ $((now - started)) -lt "$STARTUP_GRACE" ]]
 }
 
 recent_errors() {
@@ -265,6 +338,7 @@ start_miner() {
     --worker "$WORKER" \
     >>"$MINER_LOG" 2>&1 &
   echo $! >"$MINER_PID"
+  date +%s >"$MINER_STARTED_AT"
   echo "$host" >"$CURRENT_POOL"
 }
 
@@ -276,16 +350,16 @@ print_report() {
 
 main() {
   mkdir -p "$INSTALL_DIR"
-  log "supervisor started interval=${CHECK_INTERVAL}s port=${PORT}"
+  log "supervisor started interval=${CHECK_INTERVAL}s port=${PORT} cooldown=${POOL_COOLDOWN}s"
   while true; do
-    host="$(best_pool)"
     current="$(cat "$CURRENT_POOL" 2>/dev/null || true)"
+    host="$current"
 
     restart_reason=""
     if ! miner_running; then
       restart_reason="miner_not_running"
-    elif [[ "$host" != "$current" ]]; then
-      restart_reason="better_pool ${current:-none}->${host}"
+    elif in_startup_grace; then
+      restart_reason=""
     elif recent_errors; then
       restart_reason="recent_error"
     elif ! recent_shares; then
@@ -294,6 +368,12 @@ main() {
 
     if [[ -n "$restart_reason" ]]; then
       log "restart reason=${restart_reason}"
+      [[ -n "$current" ]] && mark_bad_pool "$current"
+      if [[ -z "$current" ]]; then
+        host="$(best_initial_pool)"
+      else
+        host="$(next_pool "$current")"
+      fi
       stop_miner
       start_miner "$host"
     else
