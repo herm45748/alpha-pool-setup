@@ -54,20 +54,25 @@ main() {
   need_cmd timeout
   need_cmd date
 
+  if [[ ! -r /dev/tty ]]; then
+    echo "interactive terminal required" >&2
+    exit 1
+  fi
+
   mkdir -p "$INSTALL_DIR"
 
   echo "AlphaPool Pearl setup"
   echo "Miner: $MINER_URL"
   echo
 
-  read -r -p "PRL address (prl1p...): " address
+  read -r -p "PRL address (prl1p...): " address </dev/tty
   if [[ ! "$address" =~ ^prl1p[a-z0-9]+$ ]]; then
     echo "invalid PRL address: must start with prl1p" >&2
     exit 1
   fi
 
   local worker
-  read -r -p "Worker name [rig01]: " worker
+  read -r -p "Worker name [rig01]: " worker </dev/tty
   worker="${worker:-rig01}"
 
   echo
