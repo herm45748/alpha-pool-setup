@@ -45,12 +45,31 @@ ensure_pm2() {
   if command -v pm2 >/dev/null 2>&1; then
     return
   fi
+  if ! command -v npm >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "npm not found, installing nodejs/npm with apt..."
+      export DEBIAN_FRONTEND=noninteractive
+      if [[ "$(id -u)" -eq 0 ]]; then
+        apt-get update
+        apt-get install -y nodejs npm
+      elif command -v sudo >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
+      else
+        echo "missing npm and sudo; run as root or install nodejs/npm first" >&2
+        exit 1
+      fi
+    else
+      echo "missing npm and apt-get; install nodejs/npm or PM2 first" >&2
+      exit 1
+    fi
+  fi
   if command -v npm >/dev/null 2>&1; then
     echo "pm2 not found, installing with npm..."
     npm install -g pm2
     return
   fi
-  echo "missing pm2 and npm; install Node/npm or PM2 first" >&2
+  echo "failed to install pm2" >&2
   exit 1
 }
 
