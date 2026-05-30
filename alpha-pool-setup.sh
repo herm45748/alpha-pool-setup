@@ -46,6 +46,19 @@ shell_quote() {
   printf "%q" "$1"
 }
 
+generate_worker_name() {
+  local host suffix
+  host="$(hostname 2>/dev/null || echo rig)"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+  host="${host:-rig}"
+  if command -v openssl >/dev/null 2>&1; then
+    suffix="$(openssl rand -hex 3)"
+  else
+    suffix="$(date +%s%N | sha256sum | cut -c1-6)"
+  fi
+  printf 'rig-%s-%s' "$host" "$suffix"
+}
+
 ensure_pm2() {
   if command -v pm2 >/dev/null 2>&1; then
     return
@@ -94,11 +107,12 @@ load_existing_or_prompt() {
   fi
 
   if [[ -z "$worker" ]]; then
+    default_worker="$(generate_worker_name)"
     if [[ ! -r /dev/tty ]]; then
-      worker="rig01"
+      worker="$default_worker"
     else
-      read -r -p "Worker name [rig01]: " worker </dev/tty
-      worker="${worker:-rig01}"
+      read -r -p "Worker name [$default_worker]: " worker </dev/tty
+      worker="${worker:-$default_worker}"
     fi
   fi
 }
