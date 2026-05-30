@@ -195,7 +195,7 @@ source "$HOME/alpha-pool/alpha-pool.env"
 STATUS_BIN="$HOME/alpha-pool/status.sh"
 
 log() {
-  printf '[%s] %s\n' "$(date -Is)" "$*"
+  printf '[%s] %s\n' "$(date -Is)" "$*" >&2
 }
 
 tcp_latency_ms() {
