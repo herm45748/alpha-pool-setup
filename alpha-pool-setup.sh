@@ -394,7 +394,20 @@ write_helpers() {
   cat >"$UPDATE_BIN" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-curl -fsSL "$SETUP_URL" | bash -s -- --update
+tmp="\$(mktemp)"
+cleanup() { rm -f "\$tmp"; }
+trap cleanup EXIT
+
+echo "downloading latest setup..."
+curl -fL --retry 3 -o "\$tmp" "$SETUP_URL"
+bash -n "\$tmp"
+
+pm2 stop alpha-pool >/dev/null 2>&1 || true
+pm2 delete alpha-pool >/dev/null 2>&1 || true
+pkill -x alpha-miner >/dev/null 2>&1 || true
+pkill -f alpha-pool-supervisor.sh >/dev/null 2>&1 || true
+
+bash "\$tmp" --update
 EOF
   chmod +x "$UPDATE_BIN"
 
