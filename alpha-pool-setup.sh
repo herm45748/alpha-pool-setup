@@ -13,6 +13,7 @@ STATUS_BIN="$INSTALL_DIR/status.sh"
 UPDATE_BIN="$INSTALL_DIR/update.sh"
 RESTART_BIN="$INSTALL_DIR/restart.sh"
 SET_ADDRESS_BIN="$INSTALL_DIR/set-address.sh"
+RESET_WORKER_BIN="$INSTALL_DIR/reset-worker.sh"
 CONFIG_FILE="$INSTALL_DIR/alpha-pool.env"
 MINER_LOG="$INSTALL_DIR/alpha-miner.log"
 SUPERVISOR_LOG="$INSTALL_DIR/supervisor.log"
@@ -106,11 +107,14 @@ load_existing_or_prompt() {
     exit 1
   fi
 
-  if [[ -z "$worker" ]]; then
+  if [[ -z "$worker" || "$worker" == "rig01" ]]; then
     default_worker="$(generate_worker_name)"
     if [[ ! -r /dev/tty ]]; then
       worker="$default_worker"
     else
+      if [[ "$worker" == "rig01" ]]; then
+        echo "old default worker rig01 detected; replacing with unique worker: $default_worker"
+      fi
       read -r -p "Worker name [$default_worker]: " worker </dev/tty
       worker="${worker:-$default_worker}"
     fi
@@ -472,6 +476,53 @@ pm2 restart alpha-pool
 pm2 logs alpha-pool --lines 80
 EOF
   chmod +x "$SET_ADDRESS_BIN"
+
+  cat >"$RESET_WORKER_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="$HOME/alpha-pool/alpha-pool.env"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "missing config: $CONFIG" >&2
+  exit 1
+fi
+
+generate_worker_name() {
+  local host suffix
+  host="$(hostname 2>/dev/null || echo rig)"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+  host="${host:-rig}"
+  if command -v openssl >/dev/null 2>&1; then
+    suffix="$(openssl rand -hex 3)"
+  else
+    suffix="$(date +%s%N | sha256sum | cut -c1-6)"
+  fi
+  printf 'rig-%s-%s' "$host" "$suffix"
+}
+
+worker="$(generate_worker_name)"
+tmp="$(mktemp)"
+replaced=0
+while IFS= read -r line; do
+  case "$line" in
+    WORKER=*)
+      printf 'WORKER=%q\n' "$worker"
+      replaced=1
+      ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done <"$CONFIG" >"$tmp"
+if [[ "$replaced" -eq 0 ]]; then
+  printf 'WORKER=%q\n' "$worker" >>"$tmp"
+fi
+mv "$tmp" "$CONFIG"
+
+echo "new worker: $worker"
+pkill -x alpha-miner >/dev/null 2>&1 || true
+pm2 restart alpha-pool
+pm2 logs alpha-pool --lines 80
+EOF
+  chmod +x "$RESET_WORKER_BIN"
 }
 
 download_miner() {
@@ -521,6 +572,7 @@ main() {
   echo "  $UPDATE_BIN"
   echo "  $RESTART_BIN"
   echo "  $SET_ADDRESS_BIN"
+  echo "  $RESET_WORKER_BIN"
 }
 
 main "$@"
