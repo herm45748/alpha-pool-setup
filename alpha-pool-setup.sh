@@ -8,6 +8,7 @@ MINER_URL="https://pearl.alphapool.tech/downloads/alpha-miner"
 INSTALL_DIR="${ALPHA_MINER_DIR:-$HOME/alpha-pool}"
 MINER_BIN="$INSTALL_DIR/alpha-miner"
 SUPERVISOR="$INSTALL_DIR/alpha-pool-supervisor.sh"
+STATUS_BIN="$INSTALL_DIR/status.sh"
 CONFIG_FILE="$INSTALL_DIR/alpha-pool.env"
 MINER_LOG="$INSTALL_DIR/alpha-miner.log"
 SUPERVISOR_LOG="$INSTALL_DIR/supervisor.log"
@@ -54,6 +55,84 @@ source "$HOME/alpha-pool/alpha-pool.env"
 
 log() {
   printf '[%s] %s\n' "$(date -Is)" "$*" >>"$SUPERVISOR_LOG"
+}
+
+write_status() {
+  cat >"$STATUS_BIN" <<'STATUS_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="$HOME/alpha-pool/alpha-pool.env"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "status: not installed"
+  exit 1
+fi
+source "$CONFIG"
+
+running="stopped"
+pid="-"
+if [[ -s "$MINER_PID" ]] && kill -0 "$(cat "$MINER_PID")" >/dev/null 2>&1; then
+  running="running"
+  pid="$(cat "$MINER_PID")"
+fi
+
+pool="$(cat "$CURRENT_POOL" 2>/dev/null || echo "-")"
+
+python3 - "$MINER_LOG" "$running" "$pid" "$pool" <<'PY'
+import re
+import statistics
+import sys
+from pathlib import Path
+
+log_path, running, pid, pool = sys.argv[1:5]
+text = Path(log_path).read_text(errors="replace") if Path(log_path).exists() else ""
+
+samples = [
+    (float(m.group(1)), float(m.group(2)))
+    for m in re.finditer(r"hashrate_th_s=([0-9.]+).*?share_equiv_th_s=([0-9.]+)", text)
+]
+shares = len(re.findall(r"component=share submitted|accepted", text, flags=re.I))
+errors = re.findall(
+    r".*(disconnect|timeout|timed out|connection refused|connection reset|broken pipe|failed|error|stale|rejected|lost|drop|packet).*",
+    text,
+    flags=re.I,
+)
+
+latest = samples[-1] if samples else None
+tail = samples[-20:]
+avg_hash = statistics.mean(x for x, _ in tail) if tail else None
+avg_share = statistics.mean(y for _, y in tail) if tail else None
+
+if running == "running" and latest and not errors[-3:]:
+    health = "OK"
+elif running == "running" and latest:
+    health = "WARN"
+else:
+    health = "BAD"
+
+print(f"status: {health}")
+print(f"miner: {running} pid={pid}")
+print(f"pool: {pool}:5566")
+if latest:
+    print(f"latest_hashrate: {latest[0]:.2f} TH/s")
+    print(f"latest_share_equiv: {latest[1]:.2f} TH/s")
+else:
+    print("latest_hashrate: -")
+    print("latest_share_equiv: -")
+if avg_hash is not None:
+    print(f"avg20_hashrate: {avg_hash:.2f} TH/s")
+    print(f"avg20_share_equiv: {avg_share:.2f} TH/s")
+else:
+    print("avg20_hashrate: -")
+    print("avg20_share_equiv: -")
+print(f"shares_submitted: {shares}")
+if errors:
+    print(f"recent_error: {errors[-1]}")
+else:
+    print("recent_error: -")
+PY
+STATUS_EOF
+  chmod +x "$STATUS_BIN"
 }
 
 tcp_latency_ms() {
@@ -213,6 +292,7 @@ main() {
   } >"$CONFIG_FILE"
 
   write_supervisor
+  write_status
 
   stop_pid_file "$SUPERVISOR_PID"
   stop_pid_file "$MINER_PID"
@@ -225,6 +305,7 @@ main() {
   echo "supervisor pid $(cat "$SUPERVISOR_PID")"
   echo "miner log: tail -f $MINER_LOG"
   echo "supervisor log: tail -f $SUPERVISOR_LOG"
+  echo "status: $STATUS_BIN"
   echo "current pool: cat $CURRENT_POOL"
   echo "stop: kill \$(cat $SUPERVISOR_PID); kill \$(cat $MINER_PID)"
 }
